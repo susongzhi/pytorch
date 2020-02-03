@@ -350,6 +350,85 @@ static void log_normal_kernel(TensorIterator& iter, double mean, double std, Gen
   });
 }
 
+static void random_from_to_kernel(TensorIterator& iter, uint64_t range, int64_t base, Generator* gen) {
+  AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Bool, iter.dtype(), "random_from_to_cpu", [&] {
+    CPUGenerator* generator = get_generator_or_default<CPUGenerator>(gen, detail::getDefaultCPUGenerator());
+    std::lock_guard<std::mutex> lock(generator->mutex_);
+    if ((
+      std::is_same<scalar_t, int64_t>::value ||
+      std::is_same<scalar_t, double>::value ||
+      std::is_same<scalar_t, float>::value) && range >= 1ULL << 32)
+    {
+      cpu_serial_kernel(iter, [range, base, generator]() -> scalar_t {
+        return static_cast<scalar_t>(static_cast<int64_t>((generator->random64() % range) + base));
+      });
+    } else {
+      cpu_serial_kernel(iter, [range, base, generator]() -> scalar_t {
+        return static_cast<scalar_t>(static_cast<int64_t>((generator->random() % range) + base));
+      });
+    }
+  });
+}
+
+static void random_kernel(TensorIterator& iter, Generator* gen) {
+  CPUGenerator* generator = get_generator_or_default<CPUGenerator>(gen, detail::getDefaultCPUGenerator());
+  std::lock_guard<std::mutex> lock(generator->mutex_);
+  if (isFloatingType(iter.dtype())) {
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, iter.dtype(), "random_cpu", [&] {
+      if (std::is_same<scalar_t, double>::value) {
+        cpu_serial_kernel(iter, [generator]() -> scalar_t {
+          return generator->random64() % static_cast<uint64_t>((1ULL << std::numeric_limits<scalar_t>::digits) + 1);
+        });
+      } else {
+        cpu_serial_kernel(iter, [generator]() -> scalar_t {
+          return generator->random() % static_cast<uint64_t>((1ULL << std::numeric_limits<scalar_t>::digits) + 1);
+        });
+      }
+    });
+  } else if (isIntegralType(iter.dtype(), /*includeBool=*/true)) {
+    AT_DISPATCH_INTEGRAL_TYPES_AND(at::ScalarType::Bool, iter.dtype(), "random_cpu", [&] {
+      if (std::is_same<scalar_t, int64_t>::value) {
+        cpu_serial_kernel(iter, [generator]() -> scalar_t {
+          return generator->random64() % (static_cast<uint64_t>(std::numeric_limits<scalar_t>::max()) + 1);
+        });
+      } else if (std::is_same<scalar_t, bool>::value) {
+        cpu_serial_kernel(iter, [generator]() -> scalar_t {
+          return generator->random() & 1;
+        });
+      } else {
+        cpu_serial_kernel(iter, [generator]() -> scalar_t {
+          return generator->random() % (static_cast<uint64_t>(std::numeric_limits<scalar_t>::max()) + 1);
+        });
+      }
+    });
+  }
+}
+
+// This is the special kernel to handle single specific case:
+// from(inclusive) = std::numeric_limits<int64_t>::lowest()
+// to(exclusive) = None (= std::numeric_limits<int64_t>::max() + 1)
+static void random_full_64_range_kernel(TensorIterator& iter, Generator* gen) {
+  AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Bool, iter.dtype(), "random64_cpu", [&] {
+    CPUGenerator* generator = get_generator_or_default<CPUGenerator>(gen, detail::getDefaultCPUGenerator());
+    std::lock_guard<std::mutex> lock(generator->mutex_);
+    if (std::is_same<scalar_t, int64_t>::value ||
+        std::is_same<scalar_t, double>::value ||
+        std::is_same<scalar_t, float>::value) {
+      cpu_serial_kernel(iter, [generator]() -> scalar_t {
+        return generator->random64(); // use all 64 bits
+      });
+    } else if (std::is_same<scalar_t, bool>::value) {
+      cpu_serial_kernel(iter, [generator]() -> scalar_t {
+        return generator->random() & 1; // use the lowest bit
+      });
+    } else {
+      cpu_serial_kernel(iter, [generator]() -> scalar_t {
+        return generator->random(); // use 32/16/8 bits
+      });
+    }
+  });
+}
+
 static void rsqrt_kernel(TensorIterator& iter) {
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(iter.dtype(), "rsqrt_cpu", [&] {
     cpu_kernel_vec(
@@ -434,6 +513,9 @@ REGISTER_DISPATCH(cauchy_stub, &cauchy_kernel);
 REGISTER_DISPATCH(exponential_stub, &exponential_kernel);
 REGISTER_DISPATCH(geometric_stub, &geometric_kernel);
 REGISTER_DISPATCH(log_normal_stub, &log_normal_kernel);
+REGISTER_DISPATCH(random_from_to_stub, &random_from_to_kernel);
+REGISTER_DISPATCH(random_full_64_range_stub, &random_full_64_range_kernel);
+REGISTER_DISPATCH(random_stub, &random_kernel);
 REGISTER_DISPATCH(abs_stub, &abs_kernel);
 REGISTER_DISPATCH(angle_stub, &angle_kernel);
 REGISTER_DISPATCH(real_stub, &real_kernel);

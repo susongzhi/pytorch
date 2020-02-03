@@ -6,6 +6,7 @@
 #include <ATen/NativeFunctions.h>
 #include <c10/util/Exception.h>
 #include <c10/util/math_compat.h>
+#include <c10/util/Optional.h>
 
 #include <ATen/Utils.h>
 #include <ATen/CPUGenerator.h>
@@ -118,6 +119,9 @@ DEFINE_DISPATCH(exponential_stub);
 DEFINE_DISPATCH(multinomial_stub);
 DEFINE_DISPATCH(geometric_stub);
 DEFINE_DISPATCH(log_normal_stub);
+DEFINE_DISPATCH(random_stub);
+DEFINE_DISPATCH(random_from_to_stub);
+DEFINE_DISPATCH(random_full_64_range_stub);
 
 Tensor bernoulli(const Tensor& self, Generator* gen) {
   return at::empty_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT).bernoulli_(self, gen);
@@ -211,6 +215,36 @@ Tensor& geometric_(Tensor& self, double p, Generator* gen) {
   auto iter = TensorIterator::nullary_op(self);
   geometric_stub(iter.device_type(), iter, p, gen);
   return self;
+}
+
+Tensor& random_(Tensor& self, Generator* gen) {
+  auto iter = TensorIterator::nullary_op(self);
+  random_stub(iter.device_type(), iter, gen);
+  return self;
+}
+
+Tensor& random_(Tensor& self, int64_t from, optional<int64_t> to, Generator* gen) {
+  uint64_t range;
+  auto iter = TensorIterator::nullary_op(self);
+  if (to) {
+    // [from, to)
+    TORCH_CHECK(from < *to, "random_ expects 'from' to be less than 'to', but got from=", from, " >= to=", *to);
+    range = *to - from;
+    random_from_to_stub(iter.device_type(), iter, range, from, gen);
+  } else if (from != std::numeric_limits<int64_t>::lowest()) {
+    // [from, std::numeric_limits<int64_t>::max()]
+    range = std::numeric_limits<int64_t>::max() - from + 1;
+    random_from_to_stub(iter.device_type(), iter, range, from, gen);
+  } else {
+    // [std::numeric_limits<int64_t>::lowest(), std::numeric_limits<int64_t>::max()]
+    // range = 2^64
+    random_full_64_range_stub(iter.device_type(), iter, gen);
+  }
+  return self;
+}
+
+Tensor& random_(Tensor& self, int64_t to, Generator* gen) {
+  return random_(self, 0, to, gen);
 }
 
 Tensor _standard_gamma_grad_cpu(const Tensor& self, const Tensor& output) {

@@ -138,8 +138,13 @@ class ProcessGroupAgent : public RpcAgent {
   void handleSend(const SendWork& work);
   // put RecvWork into a queue and notify the worker thread
   void enqueueRecv(RecvWork work);
-  // receiving messages
+  // Loop for receiving messages. Calls listenLoopInternal and handles errors
+  // such as timeouts on the process group.
+  void listenLoopInternal();
+  // Main function for receiving messages
   void listenLoop();
+  std::exception_ptr listenLoopException_;
+  std::atomic<bool> listenLoopExceptionSet_{false};
   // poll for timed out RPCs
   void pollTimedOutRPCs();
   // process timed out futures

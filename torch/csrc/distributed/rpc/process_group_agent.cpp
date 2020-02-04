@@ -2,6 +2,9 @@
 
 #include <c10/util/C++17.h>
 #include <c10d/ProcessGroup.hpp>
+#ifdef USE_C10D_GLOO
+#include <c10d/ProcessGroupGloo.hpp>
+#endif
 #include <torch/csrc/distributed/rpc/request_callback_impl.h>
 #include <torch/csrc/distributed/rpc/utils.h>
 
@@ -242,7 +245,8 @@ void ProcessGroupAgent::start() {
 }
 
 void ProcessGroupAgent::shutdown() {
-  LOG(INFO) << "Shutting down ProcessGroupAgent.";
+  LOG(INFO) << "Shutting down ProcessGroupAgent on rank " << pg_->getRank()
+            << ".";
   std::unique_lock<std::mutex> lock{futureMutex_};
   if (!rpcRunning_.exchange(false)) {
     return;
@@ -263,6 +267,10 @@ void ProcessGroupAgent::shutdown() {
 std::shared_ptr<FutureMessage> ProcessGroupAgent::send(
     const WorkerInfo& to,
     Message&& message) {
+  // Throw if we previously encountered an exception in ::listenLoop.
+  if (listenLoopExceptionSet_) {
+    std::rethrow_exception(listenLoopException_);
+  }
   TORCH_CHECK(rpcRunning_.load(), "ProcessGroupAgent hasn't started.")
   TORCH_CHECK(
       to.id_ < (worker_id_t)pg_->getSize(),
@@ -533,6 +541,25 @@ void ProcessGroupAgent::markFutureWithError(Message& message) {
 }
 
 void ProcessGroupAgent::listenLoop() {
+  try {
+    listenLoopInternal();
+  } catch (const std::exception& e) {
+    // Error occured in listenLoop(). Stop receiving thread and store exception
+    // to indicate that the RPC agent is in an unhealthy state and we should
+    // shutdown.
+    LOG(WARNING) << "Encountered exception in ProcessGroupAgent::listenLoop(): "
+                 << e.what();
+    listenLoopException_ = std::current_exception();
+    // Set to signal to other threads
+    listenLoopExceptionSet_.store(true);
+  } catch (...) {
+    listenLoopException_ = std::make_exception_ptr(std::runtime_error(
+        "Unknown exception occured in ProcessGroupAgent::listenLoop."));
+    listenLoopExceptionSet_.store(true);
+  }
+}
+
+void ProcessGroupAgent::listenLoopInternal() {
   while (rpcRunning_.load()) {
     // rank, tensor size, message type
     std::vector<torch::Tensor> preamble = {torch::empty({4}, {torch::kInt64})};

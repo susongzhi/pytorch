@@ -1711,3 +1711,24 @@ class RpcTest(RpcAgentTestFixture):
             self.assertTrue(hasattr(this_module, "foo_add"))
             with self.assertRaisesRegex(Exception, "AttributeError"):
                 rpc.rpc_sync(callee_worker, foo_add, args=())
+        self.assertTrue(torch.distributed.rpc.api._default_pickler is _internal_rpc_pickler)
+
+
+@unittest.skipIf(
+    sys.version_info < (3, 0),
+    "Pytorch distributed rpc package " "does not support python2",
+)
+class RpcJitTest(RpcAgentTestFixture):
+    @dist_init
+    def test_rref_as_arg(self):
+        n = self.rank + 1
+        dst_rank = n % self.world_size
+        rref_var = rpc_return_rref("worker{}".format(dst_rank))
+
+        @torch.jit.script
+        def rref_tensor_to_here(rref_var):
+            # type: (RRef[Tensor]) -> Tensor
+            return rref_var.to_here()
+
+        res = rref_tensor_to_here(rref_var)
+        self.assertEqual(res, torch.ones(2, 2) + 1)
